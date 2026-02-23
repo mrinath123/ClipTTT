@@ -58,14 +58,8 @@ export PYTHONUNBUFFERED=1
 
 
 ADAPTATION_STEPS=70
-CALCULATED_REEVAL=$(( (ADAPTATION_STEPS * 2) / 7 ))
+REEVAL_EVERY=1
 
-# Safety: Ensure REEVAL_EVERY is at least 1 
-if [ "$CALCULATED_REEVAL" -lt 1 ]; then
-    REEVAL_EVERY=1
-else
-    REEVAL_EVERY=$CALCULATED_REEVAL
-fi
 
 #================================================================================#
 # PATHS AND HYPERPARAMETERS
