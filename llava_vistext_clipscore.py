@@ -359,20 +359,20 @@ def main():
 
     processor = None
     if is_hf_model:
-        print(f"✅ Detected HF-compatible model. Loading with Auto-classes: '{args.llava_model_path}'")
+        print(f"Detected HF-compatible model. Loading with Auto-classes: '{args.llava_model_path}'")
         base_model = LlavaForConditionalGeneration.from_pretrained(args.llava_model_path, torch_dtype=target_dtype, low_cpu_mem_usage=True, device_map='auto', cache_dir=CACHE_DIR)
         processor = AutoProcessor.from_pretrained(args.llava_model_path, cache_dir=CACHE_DIR)
         tokenizer, image_processor = processor.tokenizer, processor.image_processor
     else:
-        print(f"✅ Using original LLaVA loader for model: '{args.llava_model_path}'")
+        print(f"Using original LLaVA loader for model: '{args.llava_model_path}'")
         model_name = get_model_name_from_path(args.llava_model_path)
         tokenizer, base_model, image_processor, _ = load_pretrained_model(model_path=args.llava_model_path, model_base=None, model_name=model_name, load_8bit=False, load_4bit=False, device_map='auto', torch_dtype=target_dtype, cache_dir=CACHE_DIR)
     
     base_model.eval()
     clip_model, clip_preprocess = clip.load("ViT-L/14", device=device); clip_model.eval()
-    print("  ✅ Base models loaded.")
+    print("   Base models loaded.")
     
-    print("\n--- 🖼️ PREPARING DATA & PROMPT ---")
+    print("\n---  PREPARING DATA & PROMPT ---")
     with open(args.json_path, 'r') as f: image_entries = [json.loads(line) for line in f]
     selected_image_entries = image_entries[args.image_start_index : args.image_start_index + args.num_images_to_process]
 
@@ -494,7 +494,7 @@ def main():
                 best_loss = loss_item
                 save_lora_weights(student_model, os.path.join(image_output_dir, 'lora_iter_best.pth'))
             if score > best_clip_score:
-                inner_pbar.write(f"  ✨ Step {i}: New best CLIP score! {best_clip_score:.2f} -> {score:.2f}")
+                inner_pbar.write(f"  Step {i}: New best CLIP score! {best_clip_score:.2f} -> {score:.2f}")
                 best_clip_score = score
                 save_lora_weights(student_model, os.path.join(image_output_dir, 'lora_iter_max_clip.pth'))
             
@@ -509,10 +509,11 @@ def main():
         gc.collect()
         if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-    print("\n--- ✅ SCRIPT COMPLETE ✅ ---")
+    print("\n---  SCRIPT COMPLETE  ---")
     print(f"All artifacts for this job saved in: {corruption_output_dir}")
 
 
 
 if __name__ == "__main__":
+
     main()
