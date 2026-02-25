@@ -60,7 +60,7 @@ class LoRALinear(nn.Module):
         lora_output = lora_output.to(original_output.dtype)
         return original_output + lora_output * self.scaling
 
-def apply_lora_to_llm(model: nn.Module, r: int, lora_alpha: int, target_modules: list, layer_start: int = 0, layer_end: int = -1):
+def apply_lora_to_llm(model: nn.Module, r: int, lora_alpha: int, target_modules: list, layer_start: int = 5, layer_end: int = 18):
     llm_layers_container = None
     if hasattr(model, 'language_model') and hasattr(model.language_model, 'model'):
         print("GOD MODE 👁️‍🗨️: (LoRA) Detected HF model structure -> `model.language_model.model`")
@@ -205,7 +205,7 @@ def calculate_clip_score_v2(student_model, tokenizer, image_tensor, corrupted_pi
 
 
 
-def calculate_clip_score(student_model, tokenizer, image_tensor, corrupted_pil, prompt_ids, clip_model, clip_preprocess, device, args, processor, prompt_str):
+def calculate_clip_scorev3(student_model, tokenizer, image_tensor, corrupted_pil, prompt_ids, clip_model, clip_preprocess, device, args, processor, prompt_str):
     student_model.eval()
     with torch.no_grad():
         # --- 1. Generate Caption ---
@@ -266,12 +266,12 @@ def calculate_clip_score(student_model, tokenizer, image_tensor, corrupted_pil, 
         similarities = (100.0 * image_features @ text_features.T).squeeze(0)
         # Average the scores across all sentences
         #import pdb;pdb.set_trace()
-        final_score = similarities.mean().item() - similarities.var().item()
+        final_score = similarities.mean().item() 
         return final_score
 
 
 
-def get_pseudo_gt_and_targets(teacher_model, tokenizer, image_tensor, image_size, prompt_ids, clip_model, clip_preprocess, pil_image, device, args, processor, prompt_str):
+def get_pseudo_gt_and_targetsv2(teacher_model, tokenizer, image_tensor, image_size, prompt_ids, clip_model, clip_preprocess, pil_image, device, args, processor, prompt_str):
     teacher_model.eval()
     with torch.no_grad():
         if isinstance(teacher_model, LlavaForConditionalGeneration):
@@ -287,9 +287,11 @@ def get_pseudo_gt_and_targets(teacher_model, tokenizer, image_tensor, image_size
         text_features = clip_model.encode_text(text_inputs_clip)
         image_features /= image_features.norm(dim=-1, keepdim=True)
         text_features /= text_features.norm(dim=-1, keepdim=True)
+
         similarity_scores = (100.0 * image_features @ text_features.T).squeeze()
         
         best_full_caption = candidate_captions[similarity_scores.argmax()]
+
         gt_caption = best_full_caption.split("ASSISTANT:")[-1].strip() if "ASSISTANT:" in best_full_caption else best_full_caption
 
         gt_caption_ids = tokenizer(gt_caption, return_tensors='pt', add_special_tokens=False).input_ids.to(device)
@@ -302,6 +304,129 @@ def get_pseudo_gt_and_targets(teacher_model, tokenizer, image_tensor, image_size
         attention_mask = torch.ones_like(gt_input_ids_for_model)
         
         return gt_caption, gt_input_ids_for_model, gt_sequence_ids, attention_mask
+
+
+
+def calculate_clip_score(student_model, tokenizer, image_tensor, corrupted_pil, prompt_ids, clip_model, clip_preprocess, device, args, processor, prompt_str):
+    student_model.eval()
+    with torch.no_grad():
+        # --- 1. Generate Caption ---
+        if isinstance(student_model, LlavaForConditionalGeneration):
+            inputs = processor(text=prompt_str, images=corrupted_pil, return_tensors="pt").to(device, dtype=student_model.dtype)
+            current_gen_ids = student_model.generate(
+                **inputs, 
+                do_sample=False, 
+                max_new_tokens=args.max_new_tokens, 
+                use_cache=True, 
+                pad_token_id=tokenizer.eos_token_id
+            )
+        else:
+            current_gen_ids = student_model.generate(
+                prompt_ids, 
+                images=image_tensor, 
+                image_sizes=[corrupted_pil.size], 
+                do_sample=False, 
+                max_new_tokens=args.max_new_tokens, 
+                use_cache=True, 
+                pad_token_id=tokenizer.eos_token_id
+            )
+
+        # --- 2. Decode and Clean ---
+        full_caption = tokenizer.decode(current_gen_ids[0], skip_special_tokens=True).strip()
+        caption = full_caption.split("ASSISTANT:")[-1].strip() if "ASSISTANT:" in full_caption else full_caption
+
+        if not caption:
+            return 0.0
+
+        # --- 3. Sentence-Based Chunking ---
+        raw_sentences = nltk.sent_tokenize(caption)
+        text_chunks = [s.strip() for s in raw_sentences if len(s.strip()) > 2]
+
+        if not text_chunks:
+            return 0.0
+
+        # --- 4. Calculate CLIP Score (Q10 Logic) ---
+        image_input_clip = clip_preprocess(corrupted_pil).unsqueeze(0).to(device)
+        text_inputs_clip = clip.tokenize(text_chunks, truncate=True).to(device)
+
+        image_features = clip_model.encode_image(image_input_clip)
+        text_features = clip_model.encode_text(text_inputs_clip)
+
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+        similarities = (100.0 * image_features @ text_features.T).squeeze(0)
+        
+        # --- UPDATED: Use Q10 instead of Mean ---
+        q10_score = torch.quantile(similarities.float(), 0.1).item()
+        #mean = similarities.mean().item()
+        return q10_score
+
+
+def get_pseudo_gt_and_targets(teacher_model, tokenizer, image_tensor, image_size, prompt_ids, clip_model, clip_preprocess, pil_image, device, args, processor, prompt_str):
+    teacher_model.eval()
+    with torch.no_grad():
+        # --- 1. Generate Candidates ---
+        if isinstance(teacher_model, LlavaForConditionalGeneration):
+            inputs = processor(text=prompt_str, images=pil_image, return_tensors="pt").to(device, dtype=teacher_model.dtype)
+            candidate_output_ids = teacher_model.generate(**inputs, do_sample=True, num_return_sequences=args.num_candidate_captions, temperature=0.8, top_p=0.9, max_new_tokens=args.max_new_tokens, use_cache=True, pad_token_id=tokenizer.eos_token_id)
+        else:
+            candidate_output_ids = teacher_model.generate(prompt_ids, images=image_tensor, image_sizes=[image_size], do_sample=True, num_return_sequences=args.num_candidate_captions, temperature=0.8, top_p=0.9, max_new_tokens=args.max_new_tokens, use_cache=True, pad_token_id=tokenizer.eos_token_id)
+
+        # Decode all candidates
+        candidate_captions = [tokenizer.decode(ids, skip_special_tokens=True).strip() for ids in candidate_output_ids]
+        
+        # Prepare Image for CLIP
+        image_input_clip = clip_preprocess(pil_image).unsqueeze(0).to(device)
+        image_features = clip_model.encode_image(image_input_clip)
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+
+        # --- UPDATED: Sentence-level Q10 Scoring for each candidate ---
+        candidate_q10_scores = []
+
+        for cap in candidate_captions:
+            # Clean caption (handle ASSISTANT tag)
+            clean_cap = cap.split("ASSISTANT:")[-1].strip() if "ASSISTANT:" in cap else cap
+            
+            # Split into sentences
+            raw_sents = nltk.sent_tokenize(clean_cap)
+            text_chunks = [s.strip() for s in raw_sents if len(s.strip()) > 2]
+            
+            if not text_chunks:
+                candidate_q10_scores.append(-1.0) # Penalty for empty
+                continue
+                
+            # CLIP encode individual sentences
+            text_tokens = clip.tokenize(text_chunks, truncate=True).to(device)
+            text_features = clip_model.encode_text(text_tokens)
+            text_features /= text_features.norm(dim=-1, keepdim=True)
+            
+            # Sentence-level similarities
+            sims = (100.0 * image_features @ text_features.T).squeeze(0)
+            #mean = similarities.mean().item()
+            
+            # Q10 aggregation (the hallucination detector)
+            q10_val = torch.quantile(sims.float(), 0.1).item()
+            candidate_q10_scores.append(q10_val)
+
+        # Select best candidate based on Q10 scores
+        best_idx = np.argmax(candidate_q10_scores)
+        best_full_caption = candidate_captions[best_idx]
+        
+        # --- Continue with original sequence prep logic ---
+        gt_caption = best_full_caption.split("ASSISTANT:")[-1].strip() if "ASSISTANT:" in best_full_caption else best_full_caption
+
+        gt_caption_ids = tokenizer(gt_caption, return_tensors='pt', add_special_tokens=False).input_ids.to(device)
+        if gt_caption_ids.nelement() > 0 and gt_caption_ids[0, -1] != tokenizer.eos_token_id:
+            eos_tensor = torch.tensor([[tokenizer.eos_token_id]], device=device)
+            gt_caption_ids = torch.cat([gt_caption_ids, eos_tensor], dim=1)
+
+        gt_sequence_ids = torch.cat([prompt_ids, gt_caption_ids], dim=1)
+        gt_input_ids_for_model = gt_sequence_ids[:, :-1]
+        attention_mask = torch.ones_like(gt_input_ids_for_model)
+        
+        return gt_caption, gt_input_ids_for_model, gt_sequence_ids, attention_mask
+
 
 def parse_args():
     # This function is identical to your original
@@ -359,20 +484,20 @@ def main():
 
     processor = None
     if is_hf_model:
-        print(f"Detected HF-compatible model. Loading with Auto-classes: '{args.llava_model_path}'")
+        print(f"✅ Detected HF-compatible model. Loading with Auto-classes: '{args.llava_model_path}'")
         base_model = LlavaForConditionalGeneration.from_pretrained(args.llava_model_path, torch_dtype=target_dtype, low_cpu_mem_usage=True, device_map='auto', cache_dir=CACHE_DIR)
         processor = AutoProcessor.from_pretrained(args.llava_model_path, cache_dir=CACHE_DIR)
         tokenizer, image_processor = processor.tokenizer, processor.image_processor
     else:
-        print(f"Using original LLaVA loader for model: '{args.llava_model_path}'")
+        print(f"✅ Using original LLaVA loader for model: '{args.llava_model_path}'")
         model_name = get_model_name_from_path(args.llava_model_path)
         tokenizer, base_model, image_processor, _ = load_pretrained_model(model_path=args.llava_model_path, model_base=None, model_name=model_name, load_8bit=False, load_4bit=False, device_map='auto', torch_dtype=target_dtype, cache_dir=CACHE_DIR)
     
     base_model.eval()
     clip_model, clip_preprocess = clip.load("ViT-L/14", device=device); clip_model.eval()
-    print("   Base models loaded.")
+    print("  ✅ Base models loaded.")
     
-    print("\n---  PREPARING DATA & PROMPT ---")
+    print("\n--- 🖼️ PREPARING DATA & PROMPT ---")
     with open(args.json_path, 'r') as f: image_entries = [json.loads(line) for line in f]
     selected_image_entries = image_entries[args.image_start_index : args.image_start_index + args.num_images_to_process]
 
@@ -494,7 +619,7 @@ def main():
                 best_loss = loss_item
                 save_lora_weights(student_model, os.path.join(image_output_dir, 'lora_iter_best.pth'))
             if score > best_clip_score:
-                inner_pbar.write(f"  Step {i}: New best CLIP score! {best_clip_score:.2f} -> {score:.2f}")
+                inner_pbar.write(f"  ✨ Step {i}: New best CLIP score! {best_clip_score:.2f} -> {score:.2f}")
                 best_clip_score = score
                 save_lora_weights(student_model, os.path.join(image_output_dir, 'lora_iter_max_clip.pth'))
             
@@ -509,11 +634,10 @@ def main():
         gc.collect()
         if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-    print("\n---  SCRIPT COMPLETE  ---")
+    print("\n--- ✅ SCRIPT COMPLETE ✅ ---")
     print(f"All artifacts for this job saved in: {corruption_output_dir}")
 
 
 
 if __name__ == "__main__":
-
     main()
