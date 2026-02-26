@@ -484,12 +484,12 @@ def main():
 
     processor = None
     if is_hf_model:
-        print(f"✅ Detected HF-compatible model. Loading with Auto-classes: '{args.llava_model_path}'")
+        print(f"Detected HF-compatible model. Loading with Auto-classes: '{args.llava_model_path}'")
         base_model = LlavaForConditionalGeneration.from_pretrained(args.llava_model_path, torch_dtype=target_dtype, low_cpu_mem_usage=True, device_map='auto', cache_dir=CACHE_DIR)
         processor = AutoProcessor.from_pretrained(args.llava_model_path, cache_dir=CACHE_DIR)
         tokenizer, image_processor = processor.tokenizer, processor.image_processor
     else:
-        print(f"✅ Using original LLaVA loader for model: '{args.llava_model_path}'")
+        print(f"Using original LLaVA loader for model: '{args.llava_model_path}'")
         model_name = get_model_name_from_path(args.llava_model_path)
         tokenizer, base_model, image_processor, _ = load_pretrained_model(model_path=args.llava_model_path, model_base=None, model_name=model_name, load_8bit=False, load_4bit=False, device_map='auto', torch_dtype=target_dtype, cache_dir=CACHE_DIR)
     
@@ -554,10 +554,6 @@ def main():
             optimizer.zero_grad()
 
             if is_hf_model:
-                # --- CORRECT HF MODEL HANDLING ---
-                # We let the model's internal loss function do the work, as it correctly handles the
-                # expansion of image tokens. Our job is to provide a masked `labels` tensor
-                # so that loss is only calculated on the assistant's response.
 
                 # 1. Prepare the full input sequence using the processor.
                 full_training_text = prompt_str + current_gt_caption
@@ -619,7 +615,7 @@ def main():
                 best_loss = loss_item
                 save_lora_weights(student_model, os.path.join(image_output_dir, 'lora_iter_best.pth'))
             if score > best_clip_score:
-                inner_pbar.write(f"  ✨ Step {i}: New best CLIP score! {best_clip_score:.2f} -> {score:.2f}")
+                inner_pbar.write(f"  Step {i}: New best CLIP score! {best_clip_score:.2f} -> {score:.2f}")
                 best_clip_score = score
                 save_lora_weights(student_model, os.path.join(image_output_dir, 'lora_iter_max_clip.pth'))
             
@@ -641,3 +637,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
