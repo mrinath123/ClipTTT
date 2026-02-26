@@ -404,7 +404,7 @@ def get_pseudo_gt_and_targets(teacher_model, tokenizer, image_tensor, image_size
             
             # Sentence-level similarities
             sims = (100.0 * image_features @ text_features.T).squeeze(0)
-            #mean = similarities.mean().item()
+            #mean = sims.mean().item()
             
             # Q10 aggregation (the hallucination detector)
             q10_val = torch.quantile(sims.float(), 0.1).item()
@@ -638,5 +638,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
