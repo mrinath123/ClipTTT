@@ -50,7 +50,8 @@ class LoRALinear(nn.Module):
         dtype = torch.float32
         self.lora_A = nn.Linear(original_layer.in_features, r, bias=False, device=device, dtype=dtype)
         self.lora_B = nn.Linear(r, original_layer.out_features, bias=False, device=device, dtype=dtype)
-        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))   #nn.init.normal_(self.lora_A.weight, std=1 / r)
+        #nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))   #nn.init.normal_(self.lora_A.weight, std=1 / r)
+        nn.init.normal_(self.lora_A.weight, std=1 / r)
         nn.init.zeros_(self.lora_B.weight)
         self.scaling = lora_alpha / r
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -60,7 +61,7 @@ class LoRALinear(nn.Module):
         lora_output = lora_output.to(original_output.dtype)
         return original_output + lora_output * self.scaling
 
-def apply_lora_to_llm(model: nn.Module, r: int, lora_alpha: int, target_modules: list, layer_start: int = 5, layer_end: int = 18):
+def apply_lora_to_llm(model: nn.Module, r: int, lora_alpha: int, target_modules: list, layer_start: int = 0, layer_end: int = -1):
     llm_layers_container = None
     if hasattr(model, 'language_model') and hasattr(model.language_model, 'model'):
         print("GOD MODE 👁️‍🗨️: (LoRA) Detected HF model structure -> `model.language_model.model`")
@@ -99,7 +100,7 @@ def apply_lora_to_llm(model: nn.Module, r: int, lora_alpha: int, target_modules:
     vision_tower_params = sum(p.numel() for p in vision_tower.parameters())
     llm_params = total_params - vision_tower_params
     percentage = (lora_params / total_params) * 100
-    print("\n  --- 📊 Parameter Statistics ---")
+    print("\n  --- Parameter Statistics ---")
     print(f"  Total Model Parameters:  {total_params / 1e6:.2f} M")
     print(f"  Trainable LoRA Params:   {lora_params / 1e3:.2f} K")
     print(f"  LoRA as % of Total:      {percentage:.4f} % \n")
@@ -467,9 +468,9 @@ def main():
     corruption_output_dir = os.path.join(args.output_base_dir, run_params_str, f"{args.corruption_name}_{args.corruption_severity}")
     os.makedirs(corruption_output_dir, exist_ok=True)
 
-    print("--- ⚙️ CONFIGURATION ---"); print(vars(args)); print("-----------------------")
+    print("--- CONFIGURATION ---"); print(vars(args)); print("-----------------------")
     
-    print("\n--- 🧠 LOADING BASE MODELS (ONCE) ---")
+    print("\n--- LOADING BASE MODELS (ONCE) ---")
     disable_torch_init()
 
         # Robustly detect if the model is HF-native or requires original LLaVA loading scripts
@@ -495,9 +496,9 @@ def main():
     
     base_model.eval()
     clip_model, clip_preprocess = clip.load("ViT-L/14", device=device); clip_model.eval()
-    print("  ✅ Base models loaded.")
+    print("  Base models loaded.")
     
-    print("\n--- 🖼️ PREPARING DATA & PROMPT ---")
+    print("\n--- PREPARING DATA & PROMPT ---")
     with open(args.json_path, 'r') as f: image_entries = [json.loads(line) for line in f]
     selected_image_entries = image_entries[args.image_start_index : args.image_start_index + args.num_images_to_process]
 
@@ -507,7 +508,7 @@ def main():
     prompt_ids_for_generate = tokenizer_image_token(prompt_str, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(device)
     input_token_len = prompt_ids_for_generate.shape[1]
 
-    print("\n--- 🚀 BEGINNING DYNAMIC ADAPTATION PROCESS 🚀 ---")
+    print("\n--- BEGINNING DYNAMIC ADAPTATION PROCESS  ---")
     for image_entry in (pbar := tqdm(selected_image_entries, desc="Adapting Images")):
         image_filename = image_entry['image']
         image_stem = os.path.splitext(image_filename)[0]
@@ -532,7 +533,7 @@ def main():
         corrupted_pil = Image.fromarray(corrupt(np.array(pil_image_original), corruption_name=args.corruption_name, severity=args.corruption_severity))
         image_tensor = image_processor(corrupted_pil, return_tensors="pt")['pixel_values'].to(student_model.dtype)
         
-        student_augment_transform = T.Compose([T.RandomHorizontalFlip(p=0.5), T.RandomRotation(degrees=5), T.RandomResizedCrop(size=corrupted_pil.size, scale=(0.95, 1.0), ratio=(0.95, 1.05))])
+        #student_augment_transform = T.Compose([T.RandomHorizontalFlip(p=0.5), T.RandomRotation(degrees=5), T.RandomResizedCrop(size=corrupted_pil.size, scale=(0.95, 1.0), ratio=(0.95, 1.05))])
         loss_history = []; current_gt_caption = ""
         best_loss, best_clip_score = float('inf'), -float('inf')
 
@@ -549,7 +550,7 @@ def main():
                     current_gt_caption = new_gt_caption
 
             # --- STAGE 2 & 3: FORWARD PASS & LOSS CALCULATION ---
-            augmented_pil = student_augment_transform(corrupted_pil)
+            #augmented_pil = student_augment_transform(corrupted_pil)
             student_model.train()
             optimizer.zero_grad()
 
@@ -559,7 +560,7 @@ def main():
                 full_training_text = prompt_str + current_gt_caption
                 inputs = processor(
                     text=full_training_text, 
-                    images=augmented_pil, 
+                    images=corrupted_pil, 
                     return_tensors="pt", 
                     padding="longest"
                 ).to(device)
@@ -578,7 +579,7 @@ def main():
 
             else:
                 # For original LLaVA models, use the manual tensor preparation.
-                augmented_image_tensor = image_processor(augmented_pil, return_tensors="pt")['pixel_values'].to(student_model.dtype)
+                augmented_image_tensor = image_processor(corrupted_pil, return_tensors="pt")['pixel_values'].to(student_model.dtype)
                 student_outputs = student_model(input_ids=gt_input_ids_for_model, images=augmented_image_tensor, image_sizes=[corrupted_pil.size])
                 student_logits = student_outputs.logits
 
@@ -637,4 +638,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
